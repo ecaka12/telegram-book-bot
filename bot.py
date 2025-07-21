@@ -87,11 +87,19 @@ async def scan_books(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🔎 Scanning last {limit} messages in Tamil Novels topic...")
 
     try:
-        chat = await context.bot.get_chat(GROUP_CHAT_ID)
         messages = []
-        async for message in chat.get_history(limit=limit):
-            if message.message_thread_id == TAMIL_NOVELS_TOPIC_ID:
-                messages.append(message)
+        offset_id = None
+        fetched = 0
+
+        while fetched < limit:
+            history = await context.bot.get_forum_topic(GROUP_CHAT_ID, TAMIL_NOVELS_TOPIC_ID, offset_id=offset_id, limit=min(100, limit - fetched))
+            if not history:
+                break
+            messages.extend(history)
+            offset_id = history[-1].message_id - 1
+            fetched += len(history)
+            await asyncio.sleep(0.3)
+
         messages.reverse()
     except Exception as e:
         logger.error("❌ Failed to fetch topic history: %s", e)
