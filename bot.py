@@ -162,7 +162,7 @@ async def scan_books(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     while scanned < limit:
         try:
-            response = await context.bot._request.post(
+            response = await context.bot._requester.post(
                 "getChatHistory",
                 data={
                     "chat_id": GROUP_CHAT_ID,
