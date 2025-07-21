@@ -1,3 +1,16 @@
+from pymongo import MongoClient
+import os
+
+# MongoDB connection
+client = MongoClient(os.getenv("MONGO_URI"))
+db = client.telegram_bot
+
+books_col = db.books
+bookmarks_col = db.bookmarks
+user_downloads_col = db.user_downloads
+subscribers_col = db.subscribers
+
+
 # Required imports
 from telegram import Update, ChatMemberAdministrator, ChatMemberOwner, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters, CommandHandler, CallbackQueryHandler
@@ -13,11 +26,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 # List of admins (replace with your Telegram user ID)
 ADMINS = [550283475456603]  # Replace with your Telegram user ID
 
-# In-memory storage
-books = {}  # {book_id: {title, author, category, file_id, downloads}}
-bookmarks = {}  # {user_id: [book_ids]}
-user_downloads = {}  # {user_id: count}
-subscribers = set()  # users who want new book notifications
 
 # Helper function to check if user is an admin
 async def is_admin(chat, user_id):
@@ -66,13 +74,16 @@ async def upload_book(update: Update, context: ContextTypes.DEFAULT_TYPE):
     book_id = str(len(books) + 1)
     file_id = document.file_id
 
-    books[book_id] = {
-        "title": title,
-        "author": author,
-        "category": category,
-        "file_id": file_id,
-        "downloads": 0,
-    }
+    book_id = str(books_col.count_documents({}) + 1)
+
+books_col.insert_one({
+    "_id": book_id,
+    "title": title,
+    "author": author,
+    "category": category,
+    "file_id": file_id,
+    "downloads": 0,
+})
 
     # Notify subscribers
     for user_id in subscribers:
@@ -106,7 +117,7 @@ async def view_book(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     book_id = context.args[0]
-    book = books.get(book_id)
+    book = books_col.find_one({"_id": book_id})
 
     if not book:
         await update.message.reply_text("❌ Book not found.")
@@ -141,8 +152,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ Book not found.")
             return
 
-        books[book_id]["downloads"] += 1
-        user_downloads[user_id] = user_downloads.get(user_id, 0) + 1
+        books_col.update_one(
+    {"_id": book_id},
+    {"$inc": {"downloads": 1}}
+)
+        user_downloads_col.update_one(
+    {"_id": user_id},
+    {"$inc": {"count": 1}},
+    upsert=True
+)
 
         await context.bot.send_document(
             chat_id=query.message.chat_id,
@@ -152,11 +170,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("bookmark_"):
         book_id = data.split("_")[1]
-        if user_id not in bookmarks:
-            bookmarks[user_id] = []
+        bookmark_data = bookmarks_col.find_one({"_id": user_id})
 
-        if book_id not in bookmarks[user_id]:
-            bookmarks[user_id].append(book_id)
+if not bookmark_data:
+    bookmarks_col.insert_one({"_id": user_id, "books": [book_id]})
+else:
+    if book_id not in bookmark_data["books"]:
+        bookmarks_col.update_one(
+            {"_id": user_id},
+            {"$push": {"books": book_id}}
+        )
             await query.answer("🔖 Book bookmarked!")
         else:
             await query.answer("⚠️ Already bookmarked.")
@@ -206,13 +229,16 @@ async def user_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Notifications
 async def notify_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    subscribers.add(user_id)
+    subscribers_col.update_one(
+    {"_id": user_id},
+    {"$set": {"subscribed": True}},
+    upsert=True
+)
     await update.message.reply_text("🔔 You will be notified when new books are uploaded.")
 
 async def notify_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    if user_id in subscribers:
-        subscribers.remove(user_id)
+    subscribers_col.delete_one({"_id": user_id})
     await update.message.reply_text("🔕 You will no longer receive notifications.")
 
 # Shareable link
