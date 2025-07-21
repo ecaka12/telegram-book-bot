@@ -79,216 +79,105 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/scan [limit] - Scan group topic for existing books"
     )
 
-# Upload book with cover
-async def upload_book(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.message.from_user
-    if user.id not in ADMINS:
-        await update.message.reply_text("🚫 You are not authorized to upload books.")
+# List all books
+async def list_books(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    count = books_col.count_documents({})
+    if count == 0:
+        await update.message.reply_text("📭 No books available yet.")
         return
     
-    if not (update.message.document or update.message.photo):
-        await update.message.reply_text(
-            "📎 Please send:\n"
-            "1. A cover photo (first)\n"
-            "2. The PDF file\n"
-            "With caption: /upload <title> | <author> | <category>"
-        )
-        return
+    books = books_col.find().sort("_id", 1)
+    message = "📚 Available Books:\n\n"
     
-    # Handle cover photo
-    if update.message.photo and not hasattr(context.user_data, 'upload_state'):
-        context.user_data.upload_state = 'awaiting_pdf'
-        context.user_data.cover_photo_id = update.message.photo[-1].file_id
-        context.user_data.upload_args = context.args
-        await update.message.reply_text("✅ Cover photo received. Now please send the PDF file.")
-        return
+    for book in books:
+        message += f"{book['_id']}. {book['title']} by {book['author']}\n"
     
-    # Handle PDF document
-    if hasattr(context.user_data, 'upload_state') and update.message.document:
-        if not update.message.document.file_name.endswith(".pdf"):
-            await update.message.reply_text("❌ Only PDF files are allowed.")
-            return
-        
-        title, author, category = parse_book_info(' '.join(context.user_data.upload_args))
-        book_id = str(books_col.count_documents({}) + 1)
-        
-        books_col.insert_one({
-            "_id": book_id,
-            "title": title,
-            "author": author,
-            "category": category,
-            "file_id": update.message.document.file_id,
-            "cover_id": context.user_data.cover_photo_id,
-            "downloads": 0,
-            "upload_date": datetime.now(),
-            "uploader": user.id
-        })
-        
-        # Clear upload state
-        del context.user_data.upload_state
-        del context.user_data.cover_photo_id
-        del context.user_data.upload_args
-        
-        # Notify subscribers
-        for user_data in subscribers_col.find():
-            try:
-                await context.bot.send_photo(
-                    chat_id=user_data["_id"],
-                    photo=context.user_data.cover_photo_id,
-                    caption=f"🆕 New book: {title}\nby {author}\nUse /book {book_id}"
-                )
-            except Exception:
-                continue
-        
-        await update.message.reply_text(f"✅ Book uploaded: {title} ({category})")
+    message += "\nUse `/book <id>` to view details."
+    await update.message.reply_text(message)
 
-# Enhanced scanning for 360 messages (180 covers + 180 PDFs)
-async def scan_books(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id not in ADMINS:
-        await update.message.reply_text("🚫 You are not authorized to run this command.")
-        return
-
-    limit = 360  # Default to scanning all 360 messages
-    if context.args and context.args[0].isdigit():
-        limit = int(context.args[0])
-
-    await update.message.reply_text(f"🔎 Scanning last {limit} messages in Tamil Novels topic...")
-
-    try:
-        messages = []
-        async for message in context.bot.get_chat_history(
-            chat_id=GROUP_CHAT_ID,
-            limit=limit,
-            message_thread_id=TAMIL_NOVELS_TOPIC_ID
-        ):
-            messages.append(message)
-        
-        # Process in reverse order (oldest first)
-        messages.reverse()
-    except Exception as e:
-        logger.error("❌ Failed to fetch topic history: %s", e)
-        await update.message.reply_text(f"❌ Failed to scan topic: {str(e)}")
-        return
-
-    scanned = 0
-    added = 0
-    skipped = 0
-    current_cover = None
-
-    for message in messages:
-        scanned += 1
-        try:
-            # Store cover photos temporarily
-            if message.photo:
-                current_cover = {
-                    "file_id": message.photo[-1].file_id,
-                    "caption": message.caption,
-                    "date": message.date
-                }
-                continue
-            
-            # Process PDF documents
-            if message.document and message.document.file_name.endswith(".pdf"):
-                # Check if already exists
-                if books_col.find_one({"file_id": message.document.file_id}):
-                    skipped += 1
-                    continue
-                
-                # Parse book info
-                if current_cover and current_cover["caption"]:
-                    title, author, category = parse_book_info(current_cover["caption"])
-                else:
-                    filename = message.document.file_name
-                    title = os.path.splitext(filename)[0]
-                    title, author, category = parse_book_info(title)
-                
-                # Create book entry
-                book_id = str(books_col.count_documents({}) + 1)
-                book_data = {
-                    "_id": book_id,
-                    "title": title,
-                    "author": author,
-                    "category": category,
-                    "file_id": message.document.file_id,
-                    "downloads": 0,
-                    "upload_date": message.date,
-                    "source_message_id": message.message_id
-                }
-                
-                # Add cover if available (within 5 minutes of PDF)
-                if current_cover and (message.date - current_cover["date"]).total_seconds() < 300:
-                    book_data["cover_id"] = current_cover["file_id"]
-                
-                books_col.insert_one(book_data)
-                added += 1
-                current_cover = None  # Reset cover after pairing
-                
-                # Add small delay to avoid rate limiting
-                await asyncio.sleep(0.5)
-            
-        except Exception as e:
-            logger.error(f"Error processing message {message.message_id}: {str(e)}")
-            continue
-
-    await update.message.reply_text(
-        f"📊 Scan Results:\n"
-        f"🔍 Scanned: {scanned} messages\n"
-        f"📚 Added: {added} new books\n"
-        f"⏩ Skipped: {skipped} duplicates"
-    )
-
-# View book with cover image
-async def view_book(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Search books
+async def search_books(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Usage: /book <book_id>")
+        await update.message.reply_text("Usage: /search <keyword>")
         return
     
-    book = books_col.find_one({"_id": context.args[0]})
-    if not book:
-        await update.message.reply_text("❌ Book not found.")
+    keyword = ' '.join(context.args).lower()
+    results = books_col.find({
+        "$or": [
+            {"title": {"$regex": keyword, "$options": "i"}},
+            {"author": {"$regex": keyword, "$options": "i"}}
+        ]
+    })
+    
+    if results.count() == 0:
+        await update.message.reply_text("❌ No books found.")
         return
     
-    buttons = [
-        [InlineKeyboardButton("📥 Download PDF", callback_data=f"download_{book['_id']}")],
-        [InlineKeyboardButton("🔖 Bookmark", callback_data=f"bookmark_{book['_id']}")]
-    ]
+    message = "🔍 Search Results:\n\n"
+    for book in results:
+        message += f"{book['_id']}. {book['title']} by {book['author']}\n"
     
-    caption = (
-        f"📘 {book['title']}\n"
-        f"✍️ Author: {book['author']}\n"
-        f"🗂 Category: {book['category']}\n"
-        f"📅 Uploaded: {book.get('upload_date', 'Unknown').strftime('%Y-%m-%d') if 'upload_date' in book else 'Unknown'}\n"
-        f"📥 Downloads: {book['downloads']}"
-    )
-    
-    try:
-        if 'cover_id' in book:
-            await context.bot.send_photo(
-                chat_id=update.message.chat_id,
-                photo=book['cover_id'],
-                caption=caption,
-                reply_markup=InlineKeyboardMarkup(buttons)
-            )
-        else:
-            await update.message.reply_text(
-                caption,
-                reply_markup=InlineKeyboardMarkup(buttons)
-            )
-    except Exception as e:
-        logger.error(f"Error displaying book {book['_id']}: {str(e)}")
-        await update.message.reply_text("❌ Error displaying book details.")
+    await update.message.reply_text(message)
 
-# --- Other handlers (list_books, search_books, etc.) remain the same ---
+# Top downloaded books
+async def top_books(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    top_books = books_col.find().sort("downloads", -1).limit(5)
+    
+    if top_books.count() == 0:
+        await update.message.reply_text("📭 No books available.")
+        return
+    
+    message = "🏆 Top Downloaded Books:\n\n"
+    for book in top_books:
+        message += f"{book['_id']}. {book['title']} ({book['downloads']} downloads)\n"
+    
+    await update.message.reply_text(message)
+
+# User stats
+async def user_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.message.from_user.id)
+    downloads = user_downloads_col.find_one({"_id": user_id})
+    bookmarks = bookmarks_col.find_one({"_id": user_id})
+    
+    message = "📊 Your Stats:\n\n"
+    message += f"📥 Downloads: {downloads['count'] if downloads else 0}\n"
+    message += f"🔖 Bookmarks: {len(bookmarks['books']) if bookmarks else 0}"
+    
+    await update.message.reply_text(message)
+
+# Notifications
+async def notify_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    subscribers_col.update_one(
+        {"_id": user_id},
+        {"$set": {"notifications": True}},
+        upsert=True
+    )
+    await update.message.reply_text("🔔 You will now receive notifications for new books.")
+
+async def notify_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    subscribers_col.delete_one({"_id": user_id})
+    await update.message.reply_text("🔕 You will no longer receive notifications.")
+
+# [Previous functions: upload_book, scan_books, view_book, button_handler, message_handler]
 
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     
     # Add handlers
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("books", list_books))
+    app.add_handler(CommandHandler("search", search_books))
+    app.add_handler(CommandHandler("top_books", top_books))
+    app.add_handler(CommandHandler("mystats", user_stats))
+    app.add_handler(CommandHandler("notify_on", notify_on))
+    app.add_handler(CommandHandler("notify_off", notify_off))
     app.add_handler(CommandHandler("upload", upload_book))
     app.add_handler(CommandHandler("scan", scan_books))
     app.add_handler(CommandHandler("book", view_book))
-    # Add other command handlers...
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.ALL, message_handler))
     
     logger.info("Bot is running...")
     app.run_polling()
