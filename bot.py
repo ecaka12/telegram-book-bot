@@ -1,6 +1,9 @@
 # Required imports
-from telegram import Update, ChatMemberAdministrator, ChatMemberOwner, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters, CommandHandler, CallbackQueryHandler
+from telegram import Update
+from telegram.ext import (
+    ApplicationBuilder, ContextTypes, CommandHandler,
+    MessageHandler, filters, CallbackQueryHandler
+)
 # MongoDB
 from pymongo import MongoClient
 import os
@@ -9,20 +12,22 @@ import time
 
 # --- CONFIGURATION ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")  # Set in Railway
-ADMINS = [5504106603]  # Replace with your Telegram user ID
+ADMINS = [5504106603]  # Your Telegram user ID
 MONGO_URI = os.getenv("MONGO_URI")  # Set in Railway
 RESTRICTED_TOPIC_IDS = [2, 21, 3]  # Add topic IDs if needed
 
 # --- LOGGING ---
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # --- MONGODB CONNECTION ---
-client = MongoClient(MONGO_URI)
 try:
+    client = MongoClient(MONGO_URI)
     client.admin.command('ping')
-    print("✅ MongoDB connected successfully")
+    logger.info("✅ MongoDB connected successfully")
 except Exception as e:
-    print("❌ MongoDB connection failed:", e)
+    logger.error("❌ MongoDB connection failed: %s", e)
+    raise
 
 db = client.telegram_bot
 books_col = db.books
@@ -33,6 +38,7 @@ subscribers_col = db.subscribers
 # --- HELPER FUNCTIONS ---
 async def is_admin(chat, user_id):
     member = await chat.get_member(user_id)
+    from telegram import ChatMemberAdministrator, ChatMemberOwner
     return isinstance(member, (ChatMemberAdministrator, ChatMemberOwner))
 
 # --- COMMANDS ---
@@ -49,26 +55,43 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Upload book via DM
 async def upload_book(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info("🔄 upload_book function triggered")
     user = update.message.from_user
+    logger.info(f"User ID: {user.id}")
+    logger.info(f"ADMINS: {ADMINS}")
+
     if user.id not in ADMINS:
+        logger.warning("🚫 User not in ADMINS")
         await update.message.reply_text("🚫 You are not authorized to upload books.")
         return
+
     if not update.message.document:
+        logger.warning("📎 No document attached")
         await update.message.reply_text("📎 Please send a PDF file with the following format:\n"
                                         "/upload <title> | <author> | <category>")
         return
+
     document = update.message.document
+    logger.info(f"📄 Document file name: {document.file_name}")
+
     if not document.file_name.endswith(".pdf"):
+        logger.warning("❌ Invalid file type")
         await update.message.reply_text("❌ Only PDF files are allowed.")
         return
+
     if len(context.args) < 4:
+        logger.warning("📝 Invalid command format")
         await update.message.reply_text("📝 Usage: /upload <title> | <author> | <category>")
         return
+
     title = context.args[0]
     author = context.args[2]
     category = context.args[4]
+    logger.info(f"📖 Parsed book info: {title}, {author}, {category}")
+
     book_id = str(books_col.count_documents({}) + 1)
     file_id = document.file_id
+
     books_col.insert_one({
         "_id": book_id,
         "title": title,
@@ -77,6 +100,9 @@ async def upload_book(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "file_id": file_id,
         "downloads": 0,
     })
+
+    logger.info("✅ Book saved to MongoDB")
+
     # Notify subscribers
     for user_data in subscribers_col.find():
         user_id = user_data["_id"]
@@ -87,7 +113,9 @@ async def upload_book(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception:
             pass  # Ignore users who have blocked the bot
+
     await update.message.reply_text(f"✅ Book uploaded: `{title}` ({category})")
+    logger.info("✅ Upload complete")
 
 # List all books
 async def list_books(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -209,10 +237,10 @@ async def notify_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def notify_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     subscribers_col.delete_one({"_id": user_id})
-    await update.message.reply_text("🔕 You will no longer receive notifications.")
+    await update.message.reply_text("🔔 You will no longer receive notifications.")
 
 # Shareable link
-async def share_book(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def share_book(update: Update, context:_ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 1:
         await update.message.reply_text("UsageId: /share <book_id>")
         return
@@ -223,7 +251,7 @@ async def share_book(update: Update, context: ContextTypes.DEFAULT_TYPE):
     link = f"https://t.me/noveltamizh_bot?start=book_{book_id}"
     await update.message.reply_text(f"🔗 Share this link: {link}")
 
-# Command to assign roles (e.g., /assign admin @username)
+# Command to assign roles
 async def assign_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     chat = message.chat
@@ -274,6 +302,14 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await message.reply_text("❌ Only admins can send messages in this topic.")
             await message.delete()
 
+# Log all incoming messages
+async def log_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message:
+        logger.info("📨 Incoming message: %s", update.message.text or update.message.document)
+        logger.info("User ID: %s", update.message.from_user.id)
+        logger.info("Chat Type: %s", update.message.chat.type)
+        logger.info("Document: %s", bool(update.message.document))
+
 # --- START BOT ---
 # Build and run the bot
 app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -282,6 +318,7 @@ app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
 app_bot.add_handler(CommandHandler("start", start))
 app_bot.add_handler(CommandHandler("assign", assign_role))
 app_bot.add_handler(CommandHandler("topicid", get_topic_id))
+app_bot.add_handler(MessageHandler(filters.ALL, log_all_messages), group=0)
 app_bot.add_handler(MessageHandler(filters.ALL, message_handler))
 app_bot.add_handler(CommandHandler("upload", upload_book))
 app_bot.add_handler(CommandHandler("books", list_books))
@@ -295,12 +332,12 @@ app_bot.add_handler(CommandHandler("share", share_book))
 app_bot.add_handler(CallbackQueryHandler(button_handler))
 
 # Start the bot with retry loop
-print("Bot is running...")
+logger.info("Bot is running...")
 
 while True:
     try:
         app_bot.run_polling()
     except Exception as e:
-        print("Error:", e)
-        print("Retrying in 10 seconds...")
+        logger.error("Error: %s", e)
+        logger.info("Retrying in 10 seconds...")
         time.sleep(10)
