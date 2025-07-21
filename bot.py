@@ -240,7 +240,7 @@ async def notify_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔔 You will no longer receive notifications.")
 
 # Shareable link
-async def share_book(update: Update, context:_ContextTypes.DEFAULT_TYPE):
+async def share_book(update: Update, context:ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 1:
         await update.message.reply_text("UsageId: /share <book_id>")
         return
