@@ -12,8 +12,10 @@ import time
 
 # --- CONFIGURATION ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")  # Set in Railway
-ADMINS = [5504106603]  # Your Telegram user ID
+ADMINS = [5504106603]  # Replace with your Telegram user ID
 MONGO_URI = os.getenv("MONGO_URI")  # Set in Railway
+GROUP_CHAT_ID = "-1002760881143"  # Your group chat ID
+TAMIL_NOVELS_TOPIC_ID = 2  # Tamil Novels topic ID
 RESTRICTED_TOPIC_IDS = [2, 21, 3]  # Add topic IDs if needed
 
 # --- LOGGING ---
@@ -103,6 +105,34 @@ async def upload_book(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     logger.info("✅ Book saved to MongoDB")
 
+    # Get optional cover image
+    cover = None
+    if update.message.photo:
+        cover = update.message.photo[-1].file_id  # Get highest resolution image
+
+    # 📢 Post to Tamil Novels topic
+    try:
+        if cover:
+            await context.bot.send_photo(
+                chat_id=GROUP_CHAT_ID,
+                message_thread_id=TAMIL_NOVELS_TOPIC_ID,
+                photo=cover,
+                caption=f"📘 **{title}**\n"
+                        f"✍️ Author: {author}\n"
+                        f"📂 ID: {book_id}\n"
+                        f"🔗 Use `/book {book_id}` to download."
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=GROUP_CHAT_ID,
+                message_thread_id=TAMIL_NOVELS_TOPIC_ID,
+                text=f"📚 Tamil Novel Uploaded: `{title}` by `{author}`\n"
+                     f"📁 ID: {book_id}\n"
+                     f"📘 Use `/book {book_id}` to view details."
+            )
+    except Exception as e:
+        logger.error("Failed to post in Tamil Novels topic: %s", e)
+
     # Notify subscribers
     for user_data in subscribers_col.find():
         user_id = user_data["_id"]
@@ -119,6 +149,7 @@ async def upload_book(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # List all books
 async def list_books(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info("🔄 list_books function triggered")
     count = books_col.count_documents({})
     if count == 0:
         await update.message.reply_text("📭 No books available yet.")
@@ -131,6 +162,7 @@ async def list_books(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # View book details
 async def view_book(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info("🔄 view_book function triggered")
     if len(context.args) < 1:
         await update.message.reply_text("UsageId: /book <book_id>")
         return
@@ -190,6 +222,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Search books
 async def search_books(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info("🔄 search_books function triggered")
     if len(context.args) < 1:
         await update.message.reply_text("UsageId: /search <keyword>")
         return
@@ -205,6 +238,7 @@ async def search_books(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Top downloaded books
 async def top_books(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info("🔄 top_books function triggered")
     top_books_list = books_col.find().sort("downloads", -1).limit(5)
     msg = "🏆 Top Downloaded Books:\n"
     count = 0
@@ -218,6 +252,7 @@ async def top_books(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # User stats
 async def user_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info("🔄 user_stats function triggered")
     user_id = str(update.message.from_user.id)
     downloads = user_downloads_col.find_one({"_id": user_id})
     count = downloads["count"] if downloads else 0
@@ -239,69 +274,6 @@ async def notify_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subscribers_col.delete_one({"_id": user_id})
     await update.message.reply_text("🔔 You will no longer receive notifications.")
 
-# Shareable link
-async def share_book(update: Update, context:ContextTypes.DEFAULT_TYPE):
-    if len(context.args) < 1:
-        await update.message.reply_text("UsageId: /share <book_id>")
-        return
-    book_id = context.args[0]
-    if not books_col.find_one({"_id": book_id}):
-        await update.message.reply_text("❌ Book not found.")
-        return
-    link = f"https://t.me/noveltamizh_bot?start=book_{book_id}"
-    await update.message.reply_text(f"🔗 Share this link: {link}")
-
-# Command to assign roles
-async def assign_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    chat = message.chat
-    user = message.from_user
-    if chat.type != "supergroup":
-        await message.reply_text("This command only works in supergroups.")
-        return
-    if not await is_admin(chat, user.id):
-        await message.reply_text("You are not an admin.")
-        return
-    if len(context.args) < 2:
-        await message.reply_text("Usage: /assign <role> <@username>")
-        return
-    role = context.args[0].lower()
-    mention = context.args[1]
-    if not mention.startswith("@"):
-        await message.reply_text("Please mention a user with @username")
-        return
-    await message.reply_text(f"Assigned role '{role}' to {mention}")
-
-# Command to get current topic ID
-async def get_topic_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    topic_id = message.message_thread_id
-    if topic_id:
-        await message.reply_text(f"📌 This topic ID is: `{topic_id}`")
-    else:
-        await message.reply_text("⚠️ This is not a topic (or it's the General topic).")
-
-# Main message handler
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    chat = message.chat
-    if not message or not chat:
-        return
-    # Delete join/leave messages
-    if message.new_chat_members or message.left_chat_member:
-        await message.delete()
-        return
-    # Delete messages with Telegram links
-    if message.text and ('t.me/' in message.text or 'telegram.me/' in message.text):
-        await message.reply_text("🚫 Telegram links are not allowed!")
-        await message.delete()
-    # Restrict messaging in specific topics
-    topic_id = message.message_thread_id
-    if topic_id and topic_id in RESTRICTED_TOPIC_IDS:
-        if message.from_user.id not in ADMINS and not await is_admin(chat, message.from_user.id):
-            await message.reply_text("❌ Only admins can send messages in this topic.")
-            await message.delete()
-
 # Log all incoming messages
 async def log_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
@@ -316,10 +288,6 @@ app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
 
 # Add handlers
 app_bot.add_handler(CommandHandler("start", start))
-app_bot.add_handler(CommandHandler("assign", assign_role))
-app_bot.add_handler(CommandHandler("topicid", get_topic_id))
-app_bot.add_handler(MessageHandler(filters.ALL, log_all_messages), group=0)
-app_bot.add_handler(MessageHandler(filters.ALL, message_handler))
 app_bot.add_handler(CommandHandler("upload", upload_book))
 app_bot.add_handler(CommandHandler("books", list_books))
 app_bot.add_handler(CommandHandler("book", view_book))
@@ -328,8 +296,9 @@ app_bot.add_handler(CommandHandler("top_books", top_books))
 app_bot.add_handler(CommandHandler("mystats", user_stats))
 app_bot.add_handler(CommandHandler("notify_on", notify_on))
 app_bot.add_handler(CommandHandler("notify_off", notify_off))
-app_bot.add_handler(CommandHandler("share", share_book))
 app_bot.add_handler(CallbackQueryHandler(button_handler))
+app_bot.add_handler(MessageHandler(filters.ALL, log_all_messages), group=0)
+app_bot.add_handler(MessageHandler(filters.ALL, message_handler))
 
 # Start the bot with retry loop
 logger.info("Bot is running...")
