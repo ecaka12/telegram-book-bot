@@ -7,7 +7,8 @@ from flask import Flask
 from threading import Thread
 
 # Replace with your bot token
-BOT_TOKEN = "747326tAXHwzdd1333rcDT481tC03zBMLgLU"
+import os
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 # List of admins (replace with your Telegram user ID)
 ADMINS = [550283475456603]  # Replace with your Telegram user ID
