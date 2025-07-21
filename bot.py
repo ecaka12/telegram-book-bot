@@ -1,12 +1,11 @@
 # Required imports
 from telegram import Update, ChatMemberAdministrator, ChatMemberOwner, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters, CommandHandler, CallbackQueryHandler
-# Flask for dummy web server
-from flask import Flask
-from threading import Thread
 # MongoDB
 from pymongo import MongoClient
 import os
+import logging
+import time
 
 # --- CONFIGURATION ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")  # Set in Railway
@@ -14,10 +13,18 @@ ADMINS = [5504106603]  # Replace with your Telegram user ID
 MONGO_URI = os.getenv("MONGO_URI")  # Set in Railway
 RESTRICTED_TOPIC_IDS = [2, 21, 3]  # Add topic IDs if needed
 
+# --- LOGGING ---
+logging.basicConfig(level=logging.INFO)
+
 # --- MONGODB CONNECTION ---
 client = MongoClient(MONGO_URI)
-db = client.telegram_bot
+try:
+    client.admin.command('ping')
+    print("✅ MongoDB connected successfully")
+except Exception as e:
+    print("❌ MongoDB connection failed:", e)
 
+db = client.telegram_bot
 books_col = db.books
 bookmarks_col = db.bookmarks
 user_downloads_col = db.user_downloads
@@ -28,24 +35,9 @@ async def is_admin(chat, user_id):
     member = await chat.get_member(user_id)
     return isinstance(member, (ChatMemberAdministrator, ChatMemberOwner))
 
-# --- DUMMY WEB SERVER TO KEEP BOT ALIVE ---
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "Bot is running"
-
-def run():
-    app.run(host='0.0.0.0', port=8080)
-
-def keep_alive():
-    server = Thread(target=run)
-    server.daemon = True
-    server.start()
-
 # --- COMMANDS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Hello! I'm NovelTamizh Bot. I help manage your group!\n"
+    await update.message.reply_text("Hello! I'm NovelTamizh Bot. I help manage your group!\n\n"
                                     "Here are some commands you can use:\n"
                                     "/books - View all books\n"
                                     "/search <keyword> - Search for a book\n"
@@ -77,7 +69,6 @@ async def upload_book(update: Update, context: ContextTypes.DEFAULT_TYPE):
     category = context.args[4]
     book_id = str(books_col.count_documents({}) + 1)
     file_id = document.file_id
-
     books_col.insert_one({
         "_id": book_id,
         "title": title,
@@ -86,7 +77,6 @@ async def upload_book(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "file_id": file_id,
         "downloads": 0,
     })
-
     # Notify subscribers
     for user_data in subscribers_col.find():
         user_id = user_data["_id"]
@@ -97,7 +87,6 @@ async def upload_book(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception:
             pass  # Ignore users who have blocked the bot
-
     await update.message.reply_text(f"✅ Book uploaded: `{title}` ({category})")
 
 # List all books
@@ -204,10 +193,8 @@ async def user_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.message.from_user.id)
     downloads = user_downloads_col.find_one({"_id": user_id})
     count = downloads["count"] if downloads else 0
-
     bookmark_data = bookmarks_col.find_one({"_id": user_id})
     bks = bookmark_data["books"] if bookmark_data else []
-
     bookmarked = ", ".join(bks) if bks else "None"
     await update.message.reply_text(f"📊 **Your Stats**\n"
                                     f"📥 Books downloaded: {count}\n"
@@ -236,7 +223,6 @@ async def share_book(update: Update, context: ContextTypes.DEFAULT_TYPE):
     link = f"https://t.me/noveltamizh_bot?start=book_{book_id}"
     await update.message.reply_text(f"🔗 Share this link: {link}")
 
-# --- OTHER HANDLERS ---
 # Command to assign roles (e.g., /assign admin @username)
 async def assign_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
@@ -297,8 +283,6 @@ app_bot.add_handler(CommandHandler("start", start))
 app_bot.add_handler(CommandHandler("assign", assign_role))
 app_bot.add_handler(CommandHandler("topicid", get_topic_id))
 app_bot.add_handler(MessageHandler(filters.ALL, message_handler))
-
-# New handlers
 app_bot.add_handler(CommandHandler("upload", upload_book))
 app_bot.add_handler(CommandHandler("books", list_books))
 app_bot.add_handler(CommandHandler("book", view_book))
@@ -310,7 +294,13 @@ app_bot.add_handler(CommandHandler("notify_off", notify_off))
 app_bot.add_handler(CommandHandler("share", share_book))
 app_bot.add_handler(CallbackQueryHandler(button_handler))
 
-# Start dummy web server and bot
-keep_alive()
+# Start the bot with retry loop
 print("Bot is running...")
-app_bot.run_polling()
+
+while True:
+    try:
+        app_bot.run_polling()
+    except Exception as e:
+        print("Error:", e)
+        print("Retrying in 10 seconds...")
+        time.sleep(10)
