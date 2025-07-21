@@ -80,77 +80,74 @@ async def scan_books(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🚫 You are not authorized to run this command.")
         return
 
-    limit = 360
-    if context.args and context.args[0].isdigit():
-        limit = int(context.args[0])
-
+    limit = int(context.args[0]) if context.args and context.args[0].isdigit() else 360
     await update.message.reply_text(f"🔎 Scanning last {limit} messages in Tamil Novels topic...")
 
-    try:
-        messages = []
-        offset_id = None
-        fetched = 0
-
-        while fetched < limit:
-            history = await context.bot.get_forum_topic(GROUP_CHAT_ID, TAMIL_NOVELS_TOPIC_ID, offset_id=offset_id, limit=min(100, limit - fetched))
-            if not history:
-                break
-            messages.extend(history)
-            offset_id = history[-1].message_id - 1
-            fetched += len(history)
-            await asyncio.sleep(0.3)
-
-        messages.reverse()
-    except Exception as e:
-        logger.error("❌ Failed to fetch topic history: %s", e)
-        await update.message.reply_text(f"❌ Failed to scan topic: {str(e)}")
-        return
-
-    scanned = 0
-    added = 0
-    skipped = 0
+    scanned = added = skipped = 0
     current_cover = None
+    last_id = 0
 
-    for message in messages:
-        scanned += 1
+    while scanned < limit:
         try:
-            if message.photo:
-                current_cover = {
-                    "file_id": message.photo[-1].file_id,
-                    "caption": message.caption,
-                    "date": message.date
-                }
-                continue
-            if message.document and message.document.file_name.endswith(".pdf"):
-                if books_col.find_one({"file_id": message.document.file_id}):
-                    skipped += 1
+            resp = await context.bot.request("getChatHistory", {
+                "chat_id": GROUP_CHAT_ID,
+                "message_thread_id": TAMIL_NOVELS_TOPIC_ID,
+                "limit": min(100, limit - scanned),
+                "offset": last_id
+            })
+            msgs = resp.get("result") or []
+            if not msgs:
+                break
+
+            for m in msgs:
+                scanned += 1
+                last_id = m["message_id"] + 1
+
+                if "photo" in m:
+                    current_cover = {
+                        "file_id": m["photo"][-1]["file_id"],
+                        "caption": m.get("caption"),
+                        "date": datetime.fromtimestamp(m["date"])
+                    }
                     continue
-                if current_cover and current_cover["caption"]:
-                    title, author, category = parse_book_info(current_cover["caption"])
-                else:
-                    filename = message.document.file_name
-                    title = os.path.splitext(filename)[0]
-                    title, author, category = parse_book_info(title)
-                book_id = str(books_col.count_documents({}) + 1)
-                book_data = {
-                    "_id": book_id,
-                    "title": title,
-                    "author": author,
-                    "category": category,
-                    "file_id": message.document.file_id,
-                    "downloads": 0,
-                    "upload_date": message.date,
-                    "source_message_id": message.message_id
-                }
-                if current_cover and (message.date - current_cover["date"]).total_seconds() < 300:
-                    book_data["cover_id"] = current_cover["file_id"]
-                books_col.insert_one(book_data)
-                added += 1
-                current_cover = None
-                await asyncio.sleep(0.5)
+
+                doc = m.get("document")
+                if doc and doc.get("file_name", "").endswith(".pdf"):
+                    if books_col.find_one({"file_id": doc["file_id"]}):
+                        skipped += 1
+                        continue
+
+                    if current_cover and current_cover["caption"]:
+                        title, author, category = parse_book_info(current_cover["caption"])
+                    else:
+                        fn = doc["file_name"].rsplit(".", 1)[0]
+                        title, author, category = parse_book_info(fn)
+
+                    book_id = str(books_col.count_documents({}) + 1)
+                    data = {
+                        "_id": book_id,
+                        "title": title,
+                        "author": author,
+                        "category": category,
+                        "file_id": doc["file_id"],
+                        "downloads": 0,
+                        "upload_date": datetime.fromtimestamp(m["date"]),
+                        "source_message_id": m["message_id"]
+                    }
+                    if current_cover and (datetime.fromtimestamp(m["date"]) - current_cover["date"]).total_seconds() < 300:
+                        data["cover_id"] = current_cover["file_id"]
+
+                    books_col.insert_one(data)
+                    added += 1
+                    current_cover = None
+            if len(msgs) < min(100, limit - scanned):
+                break
+            await asyncio.sleep(0.2)
+
         except Exception as e:
-            logger.error(f"Error processing message {message.message_id}: {str(e)}")
-            continue
+            logger.error("❌ Failed to fetch topic history: %s", e)
+            await update.message.reply_text(f"❌ Failed to scan topic: {str(e)}")
+            return
 
     await update.message.reply_text(
         f"📊 Scan Results:\n"
