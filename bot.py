@@ -148,6 +148,91 @@ async def my_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     count = stats["downloads"] if stats else 0
     await update.message.reply_text(f"📊 You have downloaded {count} books.")
 
+async def scan_books(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id not in ADMINS:
+        await update.message.reply_text("🚫 You are not authorized to run this command.")
+        return
+
+    limit = int(context.args[0]) if context.args and context.args[0].isdigit() else 360
+    await update.message.reply_text(f"🔎 Scanning last {limit} messages in Tamil Novels topic...")
+
+    scanned = added = skipped = 0
+    current_cover = None
+    last_id = 0
+
+    while scanned < limit:
+        try:
+            response = await context.bot._request.post(
+                "getChatHistory",
+                data={
+                    "chat_id": GROUP_CHAT_ID,
+                    "message_thread_id": TAMIL_NOVELS_TOPIC_ID,
+                    "limit": min(100, limit - scanned),
+                    "offset": last_id
+                }
+            )
+            msgs = response.get("result", [])
+            if not msgs:
+                break
+
+            for m in msgs:
+                scanned += 1
+                last_id = m["message_id"] + 1
+
+                if "photo" in m:
+                    current_cover = {
+                        "file_id": m["photo"][-1]["file_id"],
+                        "caption": m.get("caption"),
+                        "date": datetime.fromtimestamp(m["date"])
+                    }
+                    continue
+
+                doc = m.get("document")
+                if doc and doc.get("file_name", "").endswith(".pdf"):
+                    if books_col.find_one({"file_id": doc["file_id"]}):
+                        skipped += 1
+                        continue
+
+                    if current_cover and current_cover["caption"]:
+                        title, author, category = parse_book_info(current_cover["caption"])
+                    else:
+                        fn = doc["file_name"].rsplit(".", 1)[0]
+                        title, author, category = parse_book_info(fn)
+
+                    book_id = str(books_col.count_documents({}) + 1)
+                    data = {
+                        "_id": book_id,
+                        "title": title,
+                        "author": author,
+                        "category": category,
+                        "file_id": doc["file_id"],
+                        "downloads": 0,
+                        "upload_date": datetime.fromtimestamp(m["date"]),
+                        "source_message_id": m["message_id"]
+                    }
+                    if current_cover and (datetime.fromtimestamp(m["date"]) - current_cover["date"]).total_seconds() < 300:
+                        data["cover_id"] = current_cover["file_id"]
+
+                    books_col.insert_one(data)
+                    added += 1
+                    current_cover = None
+
+            if len(msgs) < min(100, limit - scanned):
+                break
+            await asyncio.sleep(0.2)
+
+        except Exception as e:
+            logger.error("❌ Failed to fetch topic history: %s", e)
+            await update.message.reply_text(f"❌ Failed to scan topic: {str(e)}")
+            return
+
+    await update.message.reply_text(
+        f"📊 Scan Results:\n"
+        f"🔍 Scanned: {scanned} messages\n"
+        f"📚 Added: {added} new books\n"
+        f"⏩ Skipped: {skipped} duplicates"
+    )
+
 # --- FILTER HANDLERS ---
 async def auto_delete_joins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -161,9 +246,6 @@ async def block_telegram_links(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.delete()
         except:
             pass
-
-# --- EXISTING SCAN FUNCTION OMITTED FOR BREVITY ---
-# (Already present in canvas)
 
 # --- MAIN ENTRYPOINT ---
 def main():
