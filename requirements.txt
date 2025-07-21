@@ -1,4 +1,3 @@
-python-telegram-bot==20.2
+python-telegram-bot==20.1a0 --extra-index-url https://test.pypi.org/simple/ 
 pymongo
 dnspython
-flask
