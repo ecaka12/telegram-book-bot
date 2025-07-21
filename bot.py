@@ -79,7 +79,162 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/scan [limit] - Scan group topic for existing books"
     )
 
-# List all books
+async def upload_book(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.message.from_user
+    if user.id not in ADMINS:
+        await update.message.reply_text("🚫 You are not authorized to upload books.")
+        return
+    
+    if not (update.message.document or update.message.photo):
+        await update.message.reply_text(
+            "📎 Please send:\n"
+            "1. A cover photo (first)\n"
+            "2. The PDF file\n"
+            "With caption: /upload <title> | <author> | <category>"
+        )
+        return
+    
+    # Handle cover photo
+    if update.message.photo and not hasattr(context.user_data, 'upload_state'):
+        context.user_data.upload_state = 'awaiting_pdf'
+        context.user_data.cover_photo_id = update.message.photo[-1].file_id
+        context.user_data.upload_args = context.args
+        await update.message.reply_text("✅ Cover photo received. Now please send the PDF file.")
+        return
+    
+    # Handle PDF document
+    if hasattr(context.user_data, 'upload_state') and update.message.document:
+        if not update.message.document.file_name.endswith(".pdf"):
+            await update.message.reply_text("❌ Only PDF files are allowed.")
+            return
+        
+        title, author, category = parse_book_info(' '.join(context.user_data.upload_args))
+        book_id = str(books_col.count_documents({}) + 1)
+        
+        books_col.insert_one({
+            "_id": book_id,
+            "title": title,
+            "author": author,
+            "category": category,
+            "file_id": update.message.document.file_id,
+            "cover_id": context.user_data.cover_photo_id,
+            "downloads": 0,
+            "upload_date": datetime.now(),
+            "uploader": user.id
+        })
+        
+        # Clear upload state
+        del context.user_data.upload_state
+        del context.user_data.cover_photo_id
+        del context.user_data.upload_args
+        
+        # Notify subscribers
+        for user_data in subscribers_col.find():
+            try:
+                await context.bot.send_photo(
+                    chat_id=user_data["_id"],
+                    photo=context.user_data.cover_photo_id,
+                    caption=f"🆕 New book: {title}\nby {author}\nUse /book {book_id}"
+                )
+            except Exception:
+                continue
+        
+        await update.message.reply_text(f"✅ Book uploaded: {title} ({category})")
+
+async def scan_books(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id not in ADMINS:
+        await update.message.reply_text("🚫 You are not authorized to run this command.")
+        return
+
+    limit = 360  # Default to scanning all 360 messages
+    if context.args and context.args[0].isdigit():
+        limit = int(context.args[0])
+
+    await update.message.reply_text(f"🔎 Scanning last {limit} messages in Tamil Novels topic...")
+
+    try:
+        messages = []
+        async for message in context.bot.get_chat_history(
+            chat_id=GROUP_CHAT_ID,
+            limit=limit,
+            message_thread_id=TAMIL_NOVELS_TOPIC_ID
+        ):
+            messages.append(message)
+        
+        # Process in reverse order (oldest first)
+        messages.reverse()
+    except Exception as e:
+        logger.error("❌ Failed to fetch topic history: %s", e)
+        await update.message.reply_text(f"❌ Failed to scan topic: {str(e)}")
+        return
+
+    scanned = 0
+    added = 0
+    skipped = 0
+    current_cover = None
+
+    for message in messages:
+        scanned += 1
+        try:
+            # Store cover photos temporarily
+            if message.photo:
+                current_cover = {
+                    "file_id": message.photo[-1].file_id,
+                    "caption": message.caption,
+                    "date": message.date
+                }
+                continue
+            
+            # Process PDF documents
+            if message.document and message.document.file_name.endswith(".pdf"):
+                # Check if already exists
+                if books_col.find_one({"file_id": message.document.file_id}):
+                    skipped += 1
+                    continue
+                
+                # Parse book info
+                if current_cover and current_cover["caption"]:
+                    title, author, category = parse_book_info(current_cover["caption"])
+                else:
+                    filename = message.document.file_name
+                    title = os.path.splitext(filename)[0]
+                    title, author, category = parse_book_info(title)
+                
+                # Create book entry
+                book_id = str(books_col.count_documents({}) + 1)
+                book_data = {
+                    "_id": book_id,
+                    "title": title,
+                    "author": author,
+                    "category": category,
+                    "file_id": message.document.file_id,
+                    "downloads": 0,
+                    "upload_date": message.date,
+                    "source_message_id": message.message_id
+                }
+                
+                # Add cover if available (within 5 minutes of PDF)
+                if current_cover and (message.date - current_cover["date"]).total_seconds() < 300:
+                    book_data["cover_id"] = current_cover["file_id"]
+                
+                books_col.insert_one(book_data)
+                added += 1
+                current_cover = None  # Reset cover after pairing
+                
+                # Add small delay to avoid rate limiting
+                await asyncio.sleep(0.5)
+            
+        except Exception as e:
+            logger.error(f"Error processing message {message.message_id}: {str(e)}")
+            continue
+
+    await update.message.reply_text(
+        f"📊 Scan Results:\n"
+        f"🔍 Scanned: {scanned} messages\n"
+        f"📚 Added: {added} new books\n"
+        f"⏩ Skipped: {skipped} duplicates"
+    )
+
 async def list_books(update: Update, context: ContextTypes.DEFAULT_TYPE):
     count = books_col.count_documents({})
     if count == 0:
@@ -95,7 +250,97 @@ async def list_books(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message += "\nUse `/book <id>` to view details."
     await update.message.reply_text(message)
 
-# Search books
+async def view_book(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Usage: /book <book_id>")
+        return
+    
+    book = books_col.find_one({"_id": context.args[0]})
+    if not book:
+        await update.message.reply_text("❌ Book not found.")
+        return
+    
+    buttons = [
+        [InlineKeyboardButton("📥 Download PDF", callback_data=f"download_{book['_id']}")],
+        [InlineKeyboardButton("🔖 Bookmark", callback_data=f"bookmark_{book['_id']}")]
+    ]
+    
+    caption = (
+        f"📘 {book['title']}\n"
+        f"✍️ Author: {book['author']}\n"
+        f"🗂 Category: {book['category']}\n"
+        f"📅 Uploaded: {book.get('upload_date', 'Unknown').strftime('%Y-%m-%d') if 'upload_date' in book else 'Unknown'}\n"
+        f"📥 Downloads: {book['downloads']}"
+    )
+    
+    try:
+        if 'cover_id' in book:
+            await context.bot.send_photo(
+                chat_id=update.message.chat_id,
+                photo=book['cover_id'],
+                caption=caption,
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
+        else:
+            await update.message.reply_text(
+                caption,
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
+    except Exception as e:
+        logger.error(f"Error displaying book {book['_id']}: {str(e)}")
+        await update.message.reply_text("❌ Error displaying book details.")
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    user_id = str(query.from_user.id)
+    
+    if data.startswith("download_"):
+        book_id = data.split("_")[1]
+        book = books_col.find_one({"_id": book_id})
+        
+        if not book:
+            await query.edit_message_text("❌ Book not found.")
+            return
+        
+        # Update download counts
+        books_col.update_one({"_id": book_id}, {"$inc": {"downloads": 1}})
+        user_downloads_col.update_one(
+            {"_id": user_id},
+            {"$inc": {"count": 1}},
+            upsert=True
+        )
+        
+        # Send document
+        try:
+            await context.bot.send_document(
+                chat_id=query.message.chat_id,
+                document=book["file_id"],
+                caption=f"📘 {book['title']}"
+            )
+        except Exception as e:
+            logger.error(f"Error sending document {book_id}: {str(e)}")
+            await query.edit_message_text("❌ Failed to send document. Please try again.")
+    
+    elif data.startswith("bookmark_"):
+        book_id = data.split("_")[1]
+        bookmark_data = bookmarks_col.find_one({"_id": user_id})
+        
+        if not bookmark_data:
+            bookmarks_col.insert_one({"_id": user_id, "books": [book_id]})
+            await query.answer("🔖 Bookmarked!")
+        else:
+            if book_id not in bookmark_data["books"]:
+                bookmarks_col.update_one(
+                    {"_id": user_id},
+                    {"$push": {"books": book_id}}
+                )
+                await query.answer("🔖 Bookmarked!")
+            else:
+                await query.answer("⚠️ Already bookmarked.")
+
 async def search_books(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Usage: /search <keyword>")
@@ -119,7 +364,6 @@ async def search_books(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(message)
 
-# Top downloaded books
 async def top_books(update: Update, context: ContextTypes.DEFAULT_TYPE):
     top_books = books_col.find().sort("downloads", -1).limit(5)
     
@@ -133,7 +377,6 @@ async def top_books(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(message)
 
-# User stats
 async def user_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.message.from_user.id)
     downloads = user_downloads_col.find_one({"_id": user_id})
@@ -145,7 +388,6 @@ async def user_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(message)
 
-# Notifications
 async def notify_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     subscribers_col.update_one(
@@ -160,7 +402,41 @@ async def notify_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subscribers_col.delete_one({"_id": user_id})
     await update.message.reply_text("🔕 You will no longer receive notifications.")
 
-# [Previous functions: upload_book, scan_books, view_book, button_handler, message_handler]
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message:
+        return
+    
+    chat = message.chat
+    user = message.from_user
+    
+    # Delete join/leave messages
+    if message.new_chat_members or message.left_chat_member:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
+    
+    # Delete messages with Telegram links
+    if message.text and any(link in message.text for link in ['t.me/', 'telegram.me/']):
+        try:
+            await message.reply_text("🚫 Telegram links are not allowed!")
+            await message.delete()
+        except Exception:
+            pass
+        return
+    
+    # Restrict messaging in specific topics
+    topic_id = message.message_thread_id
+    if topic_id and topic_id in RESTRICTED_TOPIC_IDS:
+        if user.id not in ADMINS and not await is_admin(chat, user.id):
+            try:
+                await message.reply_text("❌ Only admins can send messages in this topic.")
+                await message.delete()
+            except Exception:
+                pass
+            return
 
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
