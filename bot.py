@@ -141,8 +141,8 @@ async def scan_books(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🔎 Scanning last {limit} messages in Tamil Novels topic...")
 
     try:
-        # ✅ Using get_forum_topic_history (v20.2 supports this)
-        messages = context.bot.get_forum_topic_history(
+        # ✅ Uses get_forum_topic_messages (available in 20.2)
+        messages = context.bot.get_forum_topic_messages(
             chat_id=GROUP_CHAT_ID,
             message_thread_id=TAMIL_NOVELS_TOPIC_ID,
             limit=limit
@@ -228,7 +228,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
     user_id = str(query.from_user.id)
-
     if data.startswith("download_"):
         book_id = data.split("_")[1]
         book = books_col.find_one({"_id": book_id})
@@ -308,7 +307,7 @@ async def notify_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def notify_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     subscribers_col.delete_one({"_id": user_id})
-    await update.message.reply_text("🔔 You will no longer receive notifications.")
+    await update.message.reply_text("🔕 You will no longer receive notifications.")
 
 # Log all incoming messages
 async def log_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
